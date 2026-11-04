@@ -207,7 +207,7 @@ def analyze_kubernetes(paths: list[Path]) -> list[Finding]:
             if kind == "Service" and spec.get("type") == "LoadBalancer":
                 findings.append(finding("KUBE001", "medium", subject, "Service requests a load balancer.", "Confirm that public or externally routed access is intended; use an internal service where appropriate."))
 
-            pod_spec = spec
+            pod_spec: Any = None
             if kind in {"Deployment", "StatefulSet", "DaemonSet", "Job", "ReplicaSet", "ReplicationController"}:
                 template = spec.get("template", {})
                 pod_spec = template.get("spec", {}) if isinstance(template, dict) else {}
@@ -218,6 +218,8 @@ def analyze_kubernetes(paths: list[Path]) -> list[Finding]:
                 job_spec = job_template.get("spec", {}) if isinstance(job_template, dict) else {}
                 template = job_spec.get("template", {}) if isinstance(job_spec, dict) else {}
                 pod_spec = template.get("spec", {}) if isinstance(template, dict) else {}
+            else:
+                continue
             if not isinstance(pod_spec, dict):
                 continue
 

@@ -6,7 +6,7 @@ Three small, local-first checks for recurring cloud work: compare billing CSVs, 
 
 ## Verification
 
-The documented cost and IAM examples and the local regression checks have been run with Python 3. The Kubernetes example could not be executed in the current development environment because PyYAML is not installed and the package host was unreachable; install the listed dependency before relying on that command. Compose Safety Check and Terraform Plan Brief examples were also run locally and produced the expected sample reports. These checks cover examples and known cases, not every valid cloud configuration.
+The documented cost, IAM, and Kubernetes examples and the local regression checks have been run with Python 3 and PyYAML 6.0.3. The Kubernetes run caught a false positive on Service resources, which has been fixed and covered by a regression check. Compose Safety Check and Terraform Plan Brief examples were also run locally and produced the expected sample reports. These checks cover examples and known cases, not every valid cloud configuration.
 
 Run the Cloud Everyday Kit regression checks from the repository root:
 

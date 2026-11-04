@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,6 +76,31 @@ class CloudKitTests(unittest.TestCase):
         self.assertEqual(report["changes"][0]["previous"], 3.0)
         self.assertEqual(report["changes"][0]["current"], 5.0)
         self.assertEqual(report["changes"][0]["change"], 2.0)
+
+    @unittest.skipUnless(importlib.util.find_spec("yaml"), "PyYAML is not installed")
+    def test_kubernetes_example_does_not_treat_service_as_a_pod(self):
+        root = Path(__file__).resolve().parents[1]
+        findings = cloudkit.analyze_kubernetes([root / "examples/workload.yaml"])
+        pod_findings = [item for item in findings if item.rule == "KUBE003"]
+        self.assertEqual(len(pod_findings), 1)
+        self.assertIn("Deployment/sample-web", pod_findings[0].subject)
+        self.assertIn("KUBE001", {item.rule for item in findings})
+
+    @unittest.skipUnless(importlib.util.find_spec("yaml"), "PyYAML is not installed")
+    def test_kubernetes_container_override_can_disable_pod_non_root(self):
+        path = self.write_temp(
+            "apiVersion: v1\n"
+            "kind: Pod\n"
+            "metadata:\n  name: override-example\n"
+            "spec:\n"
+            "  securityContext:\n    runAsNonRoot: true\n"
+            "  containers:\n"
+            "    - name: app\n"
+            "      image: example/app:1\n"
+            "      securityContext:\n        runAsNonRoot: false\n"
+        )
+        findings = cloudkit.analyze_kubernetes([path])
+        self.assertIn("KUBE003", {item.rule for item in findings})
 
 
 if __name__ == "__main__":
