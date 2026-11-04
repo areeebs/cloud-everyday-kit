@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sample-web
+  template:
+    metadata:
+      labels:
+        app: sample-web
+    spec:
+      containers:
+        - name: web
+          image: nginx:latest
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host-data
+              mountPath: /host
+      volumes:
+        - name: host-data
+          hostPath:
+            path: /var/data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sample-web
+spec:
+  type: LoadBalancer
+  selector:
+    app: sample-web
+  ports:
+    - port: 80
+      targetPort: 80
