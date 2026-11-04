@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fnmatch
 import json
+import math
 import re
 import sys
 from dataclasses import asdict, dataclass
@@ -40,14 +42,18 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def analyze_iam(path: Path) -> list[Finding]:
     document = load_json(path)
-    statements = document.get("Statement", [])
+    if "Statement" not in document:
+        raise ValueError("IAM policy must include a Statement field.")
+    statements = document["Statement"]
     if isinstance(statements, dict):
         statements = [statements]
     if not isinstance(statements, list):
         raise ValueError("IAM policy Statement must be an object or list of objects.")
+    if any(not isinstance(statement, dict) for statement in statements):
+        raise ValueError("Every IAM policy Statement entry must be an object.")
     findings: list[Finding] = []
     for index, statement in enumerate(statements, start=1):
-        if not isinstance(statement, dict) or str(statement.get("Effect", "")).lower() != "allow":
+        if str(statement.get("Effect", "")).lower() != "allow":
             continue
         actions = statement.get("Action", [])
         resources = statement.get("Resource", [])
@@ -70,22 +76,24 @@ def analyze_iam(path: Path) -> list[Finding]:
                 "IAM006", "medium", subject, "Allow statement uses NotResource.",
                 "Review the effective resource scope carefully; NotResource excludes only the listed resources.",
             ))
-        if "*" in action_values:
+        if any(value == "*" for value in action_values):
             findings.append(finding(
                 "IAM001", "high", subject, "Allow statement grants every action.",
                 "Replace `Action: \"*\"` with the smallest action list this workload needs.",
             ))
-        elif any(value.endswith(":*") or value == "*" for value in action_values):
+        elif any("*" in value for value in action_values):
             findings.append(finding(
                 "IAM002", "medium", subject, "Allow statement includes a wildcard action pattern.",
                 "Review each wildcard action and narrow it to specific operations where possible.",
             ))
-        if "*" in resource_values:
+        if any("*" in value for value in resource_values):
             findings.append(finding(
                 "IAM003", "medium", subject, "Allow statement applies to every resource.",
                 "Scope the resource to specific ARNs when the service supports resource-level permissions.",
             ))
-        if any(value.lower() == "iam:passrole" or value.lower().endswith(":passrole") for value in action_values) and "*" in resource_values:
+        if any(fnmatch.fnmatchcase("iam:passrole", value.lower()) for value in action_values) and any(
+            "*" in value for value in resource_values
+        ):
             findings.append(finding(
                 "IAM004", "high", subject, "PassRole permission is not scoped to a role.",
                 "Restrict PassRole to the specific role ARNs and review any iam:PassedToService condition.",
@@ -101,9 +109,12 @@ def _number(value: str, row_number: int) -> float:
     if cleaned in {"", "-", "—"}:
         return 0.0
     try:
-        return float(cleaned)
+        number = float(cleaned)
     except ValueError as error:
         raise ValueError(f"Cost value on CSV row {row_number} is not numeric.") from error
+    if not math.isfinite(number):
+        raise ValueError(f"Cost value on CSV row {row_number} must be a finite number.")
+    return number
 
 
 def analyze_cost(path: Path, limit: int) -> dict[str, Any]:
@@ -164,9 +175,9 @@ def analyze_cost(path: Path, limit: int) -> dict[str, Any]:
     previous, current = all_periods[-2:]
     changes = []
     for service, values in totals.items():
-        before = values.get(previous, 0.0)
-        after = values.get(current, 0.0)
-        changes.append({"service": service, "previous": before, "current": after, "change": after - before})
+        before = round(values.get(previous, 0.0), 10)
+        after = round(values.get(current, 0.0), 10)
+        changes.append({"service": service, "previous": before, "current": after, "change": round(after - before, 10)})
     changes.sort(key=lambda item: item["change"], reverse=True)
     return {"previous_period": previous, "current_period": current, "changes": changes[:limit], "services_compared": len(totals)}
 
@@ -197,9 +208,11 @@ def analyze_kubernetes(paths: list[Path]) -> list[Finding]:
                 findings.append(finding("KUBE001", "medium", subject, "Service requests a load balancer.", "Confirm that public or externally routed access is intended; use an internal service where appropriate."))
 
             pod_spec = spec
-            if kind in {"Deployment", "StatefulSet", "DaemonSet", "Job"}:
+            if kind in {"Deployment", "StatefulSet", "DaemonSet", "Job", "ReplicaSet", "ReplicationController"}:
                 template = spec.get("template", {})
                 pod_spec = template.get("spec", {}) if isinstance(template, dict) else {}
+            elif kind == "Pod":
+                pod_spec = spec
             elif kind == "CronJob":
                 job_template = spec.get("jobTemplate", {})
                 job_spec = job_template.get("spec", {}) if isinstance(job_template, dict) else {}
@@ -213,11 +226,25 @@ def analyze_kubernetes(paths: list[Path]) -> list[Finding]:
                     findings.append(finding("KUBE002", "high", subject, "Pod mounts a hostPath volume.", "Check whether direct host filesystem access is necessary; prefer a dedicated volume or managed storage."))
                     break
 
+            containers = list(pod_spec.get("containers", []) or []) + list(pod_spec.get("initContainers", []) or [])
             pod_security = pod_spec.get("securityContext", {})
-            if isinstance(pod_security, dict) and pod_security.get("runAsNonRoot") is not True:
+            pod_requires_non_root = isinstance(pod_security, dict) and pod_security.get("runAsNonRoot") is True
+            all_containers_require_non_root = bool(containers) and all(
+                isinstance(container, dict)
+                and (
+                    (isinstance(container.get("securityContext"), dict)
+                     and container["securityContext"].get("runAsNonRoot") is True)
+                    or (
+                        (not isinstance(container.get("securityContext"), dict)
+                         or "runAsNonRoot" not in container["securityContext"])
+                        and pod_requires_non_root
+                    )
+                )
+                for container in containers
+            )
+            if not all_containers_require_non_root:
                 findings.append(finding("KUBE003", "medium", subject, "Pod does not explicitly require a non-root user.", "Set runAsNonRoot and a compatible runAsUser where the image supports it."))
 
-            containers = list(pod_spec.get("containers", []) or []) + list(pod_spec.get("initContainers", []) or [])
             for container in containers:
                 if not isinstance(container, dict):
                     continue
@@ -228,7 +255,7 @@ def analyze_kubernetes(paths: list[Path]) -> list[Finding]:
                     findings.append(finding("KUBE004", "high", container_subject, "Container runs in privileged mode.", "Remove privileged mode and grant only the specific capability or device the workload needs."))
                 image = str(container.get("image", ""))
                 image_tag = image.rsplit("/", 1)[-1].split(":")[-1] if image else ""
-                if image and (":" not in image.rsplit("/", 1)[-1] or image_tag == "latest"):
+                if image and (":" not in image.rsplit("/", 1)[-1] or not image_tag or image_tag == "latest"):
                     findings.append(finding("KUBE005", "medium", container_subject, "Image is untagged or uses the mutable latest tag.", "Use a versioned tag or a verified image digest for repeatable deployments."))
                 resources = container.get("resources", {})
                 resources = resources if isinstance(resources, dict) else {}
